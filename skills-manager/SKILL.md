@@ -1,89 +1,99 @@
 ---
 name: skills-manager
-description: 管理本机所有 agent skills 的安装、扫描、版本同步和状态检查。当你需要查看、管理、同步、更新本机所有 skills 时使用此技能。支持扫描 Claude Code、WorkBuddy、.agents、自定义仓库等多个位置的 skills，识别其存在形式（符号链接/独立目录/Git 仓库），并提供统一管理操作。当用户提到"管理skill"、"查看所有skill"、"同步skill"、"更新skill"、"skill版本"、"skill目录"、"skills 清单"时触发。
+description: 管理本机所有 agent skills 的安装、扫描、版本同步和状态检查。当你需要查看、管理、同步、更新本机所有 skills 时使用此技能。支持扫描 Claude Code、WorkBuddy、.agents、自定义仓库等多个位置的 skills，识别其存在形式（符号链接/独立目录/Git 仓库），并提供统一管理操作。当用户提到"管理skill"、"查看所有skill"、"同步skill"、"更新skill"、"skill版本"、"skill目录"、"skills 清单"、"skill冲突"、"整理skill"时触发。
 ---
 
 # Skills Manager
 
 管理本机所有 agent terminal 的 skills，提供统一视图和管理能力。
 
+## 核心策略
+
+**`.agents/skills/` 为主仓库（canonical source）**，其他终端（Claude Code、WorkBuddy）仅做符号链接。
+任何在非 agents 位置出现独立目录（非 symlink）的情况都被视为非标准，需要在整理时处理。
+
 ## 扫描范围
 
-自动扫描以下 skills 存放位置：
-
-| 路径 | 类型 | 说明 |
+| 路径 | 策略 | 说明 |
 |------|------|------|
-| `~/.agents/skills/` | 独立目录 | npx skills 安装的主要仓库 |
-| `~/.claude/skills/` | 符号链接 | Claude Code 使用的 skills |
-| `~/.workbuddy/skills/` | 混合 | WorkBuddy 使用的 skills |
+| `~/.agents/skills/` | 主仓库 | npx skills 安装的主要仓库 |
+| `~/.claude/skills/` | 只有符号链接 | Claude Code 使用的 skills |
+| `~/.workbuddy/skills/` | 只有符号链接 | WorkBuddy 使用的 skills |
 | `~/repos/dxmanooskills/` | Git 仓库 | 自定义 skills 源码 |
-| `~/.agents/.skill-lock.json` | JSON | 版本锁定信息 |
-
-## 主要功能
-
-### 1. 扫描 (`scan`)
-- 扫描所有 skills 目录
-- 识别每个 skill 的存在形式（symlink / directory / git repo）
-- 显示每个 skill 的状态和元信息
-
-### 2. 查看详情 (`list` / `info`)
-- 按位置分组列出所有 skills
-- 查看特定 skill 的详细信息
-- 检查符号链接是否断裂
-
-### 3. 同步 (`sync`)
-- 同步 `~/.claude/skills/` 和 `~/.agents/skills/` 之间的链接
-- 同步自定义 skill 到各 agent 终端
-- 修复断裂的符号链接
-
-### 4. 版本管理 (`version` / `update`)
-- 检查 npx skills 的版本更新
-- 查看自定义 skills 的 Git 状态
-- 统一升级所有可更新的 skills
-
-### 5. 健康检查 (`health`)
-- 检查所有符号链接的有效性
-- 检测缺失的 SKILL.md 文件
-- 检查重复或冲突的 skills
+| `~/.agents/.skill-lock.json` | 版本锁 | 版本锁定信息 |
 
 ## 使用方法
 
-### 查看所有 skills
+### 1. 扫描 — 查看全景
 ```
 skills-manager scan
 ```
-扫描所有位置并生成完整报表。
+跨所有位置扫描，生成带形式标识的报表：
+- 📁 独立目录   🔗 符号链接   📦 Git 仓库   💔 断裂链接
+- 自动标注非标准项（如非 agents 位置的独立目录）
+- 自动检测同名冲突、hash 不一致
 
-### 查看特定位置
-```
-skills-manager list claude      # 仅 Claude Code 的 skills
-skills-manager list workbuddy   # 仅 WorkBuddy 的 skills
-skills-manager list agents      # 仅 .agents 仓库的 skills
-skills-manager list custom      # 仅自定义 skills
-```
-
-### 健康检查
+### 2. 健康检查
 ```
 skills-manager health
 ```
+检查断裂链接、SKILL.md 缺失、非标准形式、Git 状态等。
 
-### 同步技能
+### 3. 同步
 ```
-skills-manager sync             # 同步所有终端的 skills
-skills-manager sync claude      # 仅同步 Claude Code
+skills-manager sync          # 同步 agents → claude 的 symlink
+skills-manager sync claude   # 仅同步 Claude Code
 ```
 
-### 版本管理
+### 4. 整理 — 冲突检测与修复
 ```
-skills-manager version          # 查看所有版本信息
-skills-manager update           # 更新所有可更新的 skills
+skills-manager organize
+```
+核心整理命令：
+1. 扫描所有位置的非标准 skill（非 agents 位置的独立目录）
+2. 如该 skill 在 agents 中也有 → 比较 SKILL.md hash 是否一致
+3. hash 不同 → 标记为冲突，**等你决策**
+4. hash 相同 → 自动替换为 symlink（原目录备份为 `name_bak`）
+
+单独处理某个冲突：
+```
+skills-manager resolve <skill-name>
+```
+交互式处理：替换（用 agents 版本）或保留（重命名为 `name_local`，再创建 symlink）。
+
+### 5. 版本管理
+```
+skills-manager version       # 查看所有版本信息
+skills-manager update        # 更新 npx skills + Git pull + sync
+```
+
+### 6. 创建链接
+```
+skills-manager link <name>   # 为 skill 创建跨终端符号链接
+```
+
+## 示例流程
+
+```
+# 1) 查看全貌
+skills-manager scan
+
+# 2) 如果发现有非标准项:
+skills-manager organize
+
+# 3) 处理单个冲突:
+skills-manager resolve find-skills
+
+# 4) 同步新链接:
+skills-manager sync
+
+# 5) 最终确认:
+skills-manager health
 ```
 
 ## Python 脚本
 
-管理操作由 `scripts/` 目录下的 Python 脚本执行：
+- `scripts/scan_skills.py` — 扫描和形式识别、冲突检测
+- `scripts/manage_skills.py` — 同步、整理、冲突解决、版本管理
 
-- `scripts/scan_skills.py` - 扫描和目录分析
-- `scripts/manage_skills.py` - 同步、链接、版本管理
-
-首次运行会自动创建配置到 `config/config.json`。
+配置: `config/config.json`

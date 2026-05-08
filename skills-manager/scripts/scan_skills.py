@@ -3,13 +3,14 @@
 skills-manager: 扫描和分析本机所有 skills 的分布、形式、状态。
 
 使用说明:
-  python3 scan_skills.py                     # 完整扫描并打印报表
-  python3 scan_skills.py --json              # 输出 JSON 格式
-  python3 scan_skills.py --location claude   # 仅扫描指定位置
+  python3 scan_skills.py                          # 完整扫描并打印报表
+  python3 scan_skills.py --json                   # 输出 JSON 格式
+  python3 scan_skills.py --location claude        # 仅扫描指定位置
 
 位置列表: agents, claude, workbuddy, custom
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -17,11 +18,9 @@ from pathlib import Path
 
 
 def expand_path(p: str) -> Path:
-    """展开 ~ 为完整路径"""
     return Path(os.path.expanduser(p))
 
 
-# 默认扫描路径（与 config.json 对齐）
 SCAN_PATHS = {
     "agents": "~/.agents/skills",
     "claude": "~/.claude/skills",
@@ -30,17 +29,38 @@ SCAN_PATHS = {
 }
 
 LOCK_FILE = "~/.agents/.skill-lock.json"
-CUSTOM_REPO = "~/repos/dxmanooskills"
+
+LOCATION_LABELS = {
+    "agents": ".agents 主仓库",
+    "claude": "Claude Code",
+    "workbuddy": "WorkBuddy",
+    "custom": "自定义仓库",
+}
+
+# 形式图标
+FORM_ICONS = {
+    "directory": "📁",
+    "symlink": "🔗",
+    "git_repo": "📦",
+    "broken": "💔",
+}
 
 
 def resolve_link_target(path: Path) -> str | None:
-    """如果是符号链接，返回目标路径；否则返回 None"""
     if path.is_symlink():
         try:
             return str(path.resolve())
         except OSError:
             return "[BROKEN LINK]"
     return None
+
+
+def file_hash(path: Path) -> str:
+    """计算 SKILL.md 的 SHA256 用于内容比较"""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return ""
 
 
 def get_git_status(repo_path: Path) -> dict:
@@ -52,21 +72,18 @@ def get_git_status(repo_path: Path) -> dict:
     result = {"is_git": True}
     try:
         import subprocess
-        # 当前分支
         branch = subprocess.run(
             ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, timeout=5
         )
         result["branch"] = branch.stdout.strip() if branch.returncode == 0 else "unknown"
 
-        # 是否有未提交变更
         status = subprocess.run(
             ["git", "-C", str(repo_path), "status", "--porcelain"],
             capture_output=True, text=True, timeout=5
         )
         result["dirty"] = bool(status.stdout.strip())
 
-        # 与 remote 的关系
         subprocess.run(
             ["git", "-C", str(repo_path), "fetch", "--all"],
             capture_output=True, timeout=10
@@ -89,22 +106,22 @@ def get_git_status(repo_path: Path) -> dict:
 def scan_skills(location: str | None = None) -> dict:
     """
     扫描指定位置（或所有位置）的 skills。
-    返回 {location: [skill_info, ...], ...}
+    返回 {location: {path, exists, skills: [...], git?}}
     """
-    locations_to_scan = {}
+    locations = {}
     if location:
         loc = location.lower()
         if loc in SCAN_PATHS:
-            locations_to_scan[loc] = SCAN_PATHS[loc]
+            locations[loc] = SCAN_PATHS[loc]
         else:
             print(f"错误: 未知位置 '{location}'，可选: {', '.join(SCAN_PATHS.keys())}")
             sys.exit(1)
     else:
-        locations_to_scan = SCAN_PATHS.copy()
+        locations = SCAN_PATHS.copy()
 
     result = {}
 
-    for loc_name, raw_path in locations_to_scan.items():
+    for loc_name, raw_path in locations.items():
         base = expand_path(raw_path)
         if not base.exists():
             result[loc_name] = {"path": str(base), "exists": False, "skills": []}
@@ -119,18 +136,27 @@ def scan_skills(location: str | None = None) -> dict:
 
             info = {"name": item.name}
             link_target = resolve_link_target(item)
+
             if link_target:
                 info["type"] = "symlink"
                 info["target"] = link_target
                 info["broken"] = not item.exists()
+                # 检测是否指向 .agents
+                agents_path = str(expand_path(SCAN_PATHS["agents"])).rstrip("/")
+                info["points_to_agents"] = agents_path in link_target
             else:
                 info["type"] = "directory"
+                info["broken"] = False
 
-            # 检查 SKILL.md
+            # 该 skill 同时在 .agents 中存在
+            agents_skill = expand_path(SCAN_PATHS["agents"]) / item.name
+            info["exists_in_agents"] = agents_skill.exists() or agents_skill.is_symlink()
+
+            # SKILL.md
             skill_file = item / "SKILL.md"
             info["has_skill_md"] = skill_file.exists()
+            info["skill_md_hash"] = file_hash(skill_file) if skill_file.exists() else ""
 
-            # 获取文件大小和修改时间
             try:
                 stat = item.stat()
                 info["modified"] = stat.st_mtime
@@ -141,7 +167,6 @@ def scan_skills(location: str | None = None) -> dict:
 
         entry = {"path": str(base), "exists": True, "skills": skills}
 
-        # 对 custom 仓库额外检查 Git 状态
         if loc_name == "custom" and base.exists():
             git_info = get_git_status(base)
             if git_info["is_git"]:
@@ -153,7 +178,6 @@ def scan_skills(location: str | None = None) -> dict:
 
 
 def load_lock_file() -> dict | None:
-    """加载 .skill-lock.json 版本锁定信息"""
     lock_path = expand_path(LOCK_FILE)
     if not lock_path.exists():
         return None
@@ -164,94 +188,168 @@ def load_lock_file() -> dict | None:
         return None
 
 
-def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
-    """格式化为可读报表"""
-    lines = []
-    lines.append("=" * 60)
-    lines.append("  SKILLS MANAGER — 扫描报告")
-    lines.append("=" * 60)
-    lines.append("")
+def _fmt_mtime(ts: float) -> str:
+    """ft 时间戳为简短日期"""
+    import datetime
+    if ts == 0:
+        return "?"
+    return datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
 
-    total_all = 0
+
+def _is_standard_symlink(sk: dict) -> bool:
+    """判断是否为标准 symlink（指向 .agents 或 custom repo）"""
+    if sk.get("type") != "symlink":
+        return False
+    if sk.get("broken"):
+        return False
+    target = sk.get("target", "")
+    agents_path = str(expand_path(SCAN_PATHS["agents"])).rstrip("/")
+    custom_path = str(expand_path(SCAN_PATHS["custom"])).rstrip("/")
+    return agents_path in target or custom_path in target
+
+
+def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
+    """生成带形式标识和冲突检测的报表"""
+    lines = []
+    separator = "─" * 58
+
+    lines.append("┌" + separator + "┐")
+    total_all = sum(len(e["skills"]) for e in scan_data.values() if e["exists"])
+    active_locs = sum(1 for e in scan_data.values() if e["exists"])
+    lines.append(f"│  skills-manager  发现 {total_all} skills × {active_locs} 个位置")
+    lines.append("└" + separator + "┘")
+    lines.append("")
 
     for loc_name, entry in scan_data.items():
         if not entry["exists"]:
-            lines.append(f"[{loc_name}] 路径不存在: {entry['path']}")
+            lines.append(f"  [{loc_name}] 路径不存在: {entry['path']}")
             lines.append("")
             continue
 
-        loc_label = {
-            "agents": ".agents 主仓库",
-            "claude": "Claude Code",
-            "workbuddy": "WorkBuddy",
-            "custom": "自定义仓库",
-        }.get(loc_name, loc_name)
-
+        label = LOCATION_LABELS.get(loc_name, loc_name)
         skills = entry["skills"]
-        total_all += len(skills)
-        lines.append(f"── {loc_label} ({len(skills)} skills) ──")
-        lines.append(f"   路径: {entry['path']}")
+        path_short = entry["path"].replace(os.path.expanduser("~"), "~")
+        lines.append(f"  {label}  ({len(skills)})    {path_short}")
 
         if loc_name == "custom" and entry.get("git"):
             g = entry["git"]
-            lines.append(f"   Git 分支: {g.get('branch', 'N/A')}")
-            status_parts = []
+            git_info = f"分支: {g.get('branch', '?')}"
             if g.get("dirty"):
-                status_parts.append("有未提交变更")
+                git_info += " [有未提交变更]"
             if g.get("ahead", 0) > 0:
-                status_parts.append(f"比远程领先 {g['ahead']} 个提交")
+                git_info += f" [领先远程 {g['ahead']}]"
             if g.get("behind", 0) > 0:
-                status_parts.append(f"比远程落后 {g['behind']} 个提交")
-            if status_parts:
-                lines.append(f"   Git 状态: {', '.join(status_parts)}")
+                git_info += f" [落后远程 {g['behind']}]"
+            lines.append(f"             {git_info}")
 
-        lines.append("")
+        lines.append("  " + "─" * 55)
+
         for sk in skills:
-            marker = ""
+            icon = FORM_ICONS.get(sk["type"], "?")
             if sk.get("broken"):
-                marker = " [断裂!]"
-            elif sk["type"] == "symlink":
-                marker = f" -> {sk['target']}"
-            has_md = "✓" if sk.get("has_skill_md") else "✗"
-            lines.append(f"   {has_md} {sk['name']}{marker}")
+                icon = FORM_ICONS["broken"]
 
+            name = sk["name"]
+            md_flag = "✓" if sk.get("has_skill_md") else "✗"
+
+            # 构建形式说明
+            if sk.get("broken"):
+                form_desc = "→ [断裂!] " + sk.get("target", "")
+            elif sk["type"] == "symlink":
+                target = sk.get("target", "")
+                target_short = target.replace(os.path.expanduser("~"), "~")
+                form_desc = f"→ {target_short}"
+            else:
+                form_desc = "独立目录"
+
+            # 是否标准（custom 是 git 源码仓库，目录是正常的）
+            anomaly = ""
+            if loc_name not in ("agents", "custom") and sk["type"] == "directory":
+                anomaly = " ⚠ 非标准 (应为 symlink)"
+
+            if sk.get("exists_in_agents") and loc_name not in ("agents", "custom"):
+                if sk["type"] == "directory":
+                    anomaly += " ⚡同名冲突(与 agents)"
+
+            lines.append(f"  {icon} {md_flag} {name:<28} {form_desc}{anomaly}")
+
+        # 异常汇总行
+        anomalies_here = [sk for sk in skills
+                          if (loc_name not in ("agents", "custom") and sk["type"] == "directory")
+                          or sk.get("broken")]
+        if anomalies_here:
+            lines.append(f"     ── 本位置有 {len(anomalies_here)} 个异常 ──")
         lines.append("")
 
-    # 汇总
-    lines.append("─" * 40)
-    lines.append(f"  总计: {total_all} skills 在 {sum(1 for e in scan_data.values() if e['exists'])} 个位置")
-    lines.append("")
+    # ── 跨位置冲突检测 ──
+    conflicts = find_conflicts(scan_data)
+    if conflicts:
+        lines.append("  ╔══ 冲突检测 ═══════════════════════════════════════╗")
+        lines.append("  ║  以下 skill 在多个位置以不同形式/内容存在:      ║")
+        lines.append("  ╚═══════════════════════════════════════════════════╝")
+        lines.append("")
+        for name, entries in conflicts.items():
+            lines.append(f"  ⚡ {name}")
+            for loc_name, sk in entries:
+                icon = FORM_ICONS.get(sk["type"], "?")
+                loc_label = LOCATION_LABELS.get(loc_name, loc_name)
+                h = sk.get("skill_md_hash", "")
+                hash_info = f"  SKILL.md: [{h}]" if h else "  无 SKILL.md"
+                lines.append(f"     {icon} {loc_label:<18} {hash_info}")
+            lines.append("")
 
-    # 添加 lock 信息
+    # ── 锁文件信息 ──
     if lock_data:
-        lines.append(f"  🔒 .skill-lock.json v{lock_data.get('version', '?')}")
-        lines.append(f"     记录 {len(lock_data.get('skills', {}))} 个 skill 版本")
+        lock_v = lock_data.get("version", "?")
+        lock_count = len(lock_data.get("skills", {}))
+        lines.append(f"  🔒 .skill-lock.json v{lock_v} | {lock_count} 个 skill 版本追踪")
+        lines.append("")
 
-    # 扫描断裂链接
-    broken = []
-    for entry in scan_data.values():
-        for sk in entry.get("skills", []):
-            if sk.get("broken"):
-                broken.append(sk["name"])
-    if broken:
-        lines.append(f"  ⚠️ 发现 {len(broken)} 个断裂链接: {', '.join(broken)}")
-
-    # 扫描缺少 SKILL.md 的
-    no_md = []
-    for entry in scan_data.values():
-        for sk in entry.get("skills", []):
-            if not sk.get("has_skill_md"):
-                no_md.append(f"{sk['name']}")
-    if no_md:
-        lines.append(f"  ⚠️ {len(no_md)} 个 skill 缺少 SKILL.md")
-
-    lines.append("")
-    lines.append("=" * 60)
+    lines.append(separator)
     return "\n".join(lines)
 
 
+def find_conflicts(scan_data: dict) -> dict:
+    """
+    检测同名 skill 在不同位置的冲突。
+    返回 {skill_name: [(location, skill_info), ...], ...}
+    冲突条件: 同名且有一个不是 symlink to agents
+    """
+    # 收集所有 skill: name -> [(loc, info), ...]
+    all_skills: dict[str, list] = {}
+    for loc_name, entry in scan_data.items():
+        if not entry["exists"]:
+            continue
+        for sk in entry["skills"]:
+            name = sk["name"]
+            if name not in all_skills:
+                all_skills[name] = []
+            all_skills[name].append((loc_name, sk))
+
+    conflicts = {}
+    for name, entries in all_skills.items():
+        if len(entries) < 2:
+            continue
+
+        # 检查是否有非标准条目（不是 symlink to agents 的）
+        has_non_standard = any(
+            sk.get("type") != "symlink"
+            for _, sk in entries
+        )
+        if not has_non_standard:
+            continue
+
+        # 检查是否有不同 hash
+        hashes = {sk.get("skill_md_hash", "") for _, sk in entries if sk.get("has_skill_md")}
+        if len(hashes) <= 1:
+            continue
+
+        conflicts[name] = entries
+
+    return conflicts
+
+
 def main():
-    # 解析参数
     location = None
     output_json = False
     for arg in sys.argv[1:]:
