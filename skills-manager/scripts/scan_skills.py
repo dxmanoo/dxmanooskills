@@ -208,104 +208,261 @@ def _is_standard_symlink(sk: dict) -> bool:
     return agents_path in target or custom_path in target
 
 
-def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
-    """生成带形式标识和冲突检测的报表"""
-    lines = []
-    separator = "─" * 58
-
-    lines.append("┌" + separator + "┐")
-    total_all = sum(len(e["skills"]) for e in scan_data.values() if e["exists"])
-    active_locs = sum(1 for e in scan_data.values() if e["exists"])
-    lines.append(f"│  skills-manager  发现 {total_all} skills × {active_locs} 个位置")
-    lines.append("└" + separator + "┘")
-    lines.append("")
-
+def _build_type_stats(scan_data: dict) -> dict:
+    """统计各位置按 type 分类的数量"""
+    stats = {}
     for loc_name, entry in scan_data.items():
         if not entry["exists"]:
-            lines.append(f"  [{loc_name}] 路径不存在: {entry['path']}")
-            lines.append("")
+            continue
+        counts = {"directory": 0, "symlink": 0, "broken": 0}
+        for sk in entry["skills"]:
+            t = sk.get("type", "directory")
+            if sk.get("broken"):
+                t = "broken"
+            counts[t] = counts.get(t, 0) + 1
+        stats[loc_name] = counts
+    return stats
+
+
+def _build_location_matrix(scan_data: dict) -> dict:
+    """
+    构建 {skill_name: {loc_name: {type, hash, exists_in_agents}}, ...}
+    用于交叉对照
+    """
+    matrix: dict[str, dict] = {}
+    for loc_name, entry in scan_data.items():
+        if not entry["exists"]:
+            continue
+        for sk in entry["skills"]:
+            name = sk["name"]
+            if name not in matrix:
+                matrix[name] = {}
+            matrix[name][loc_name] = {
+                "type": sk.get("type", "?"),
+                "broken": sk.get("broken", False),
+                "hash": sk.get("skill_md_hash", ""),
+                "has_md": sk.get("has_skill_md", False),
+            }
+    return matrix
+
+
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+
+def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
+    """生成管理友好的多视角扫描报表"""
+    lines = []
+    H = "─" * 60
+    active_locs = [(ln, e) for ln, e in scan_data.items() if e["exists"]]
+    total_all = sum(len(e["skills"]) for _, e in active_locs)
+
+    loc_order = ["agents", "claude", "workbuddy", "custom"]
+    labels = {
+        "agents": ".agents 主仓库",
+        "claude": "Claude Code",
+        "workbuddy": "WorkBuddy",
+        "custom": "自定义仓库",
+    }
+    short_labels = {"agents": "agents", "claude": "claude", "workbuddy": "wb", "custom": "custom"}
+
+    # ── HEADER ──
+    lines.append("")
+    lines.append(f"  {'═' * 56}")
+    lines.append(f"  ║  skills-manager  扫描报告")
+    lines.append(f"  ║  {total_all} skills × {len(active_locs)} 个位置")
+    lines.append(f"  {'═' * 56}")
+    lines.append("")
+
+    # ════════════════════════════════════════════
+    #  SECTION 1: 分布一览表
+    # ════════════════════════════════════════════
+    lines.append(f"  ▸ 分布一览")
+    lines.append(f"  {H}")
+    stats = _build_type_stats(scan_data)
+    # Header row
+    lines.append(f"  {'位置':<20} {'总计':>6} {'📁目录':>8} {'🔗链接':>8} {'路径':>25}")
+    lines.append(f"  {'─'*19} {'─'*6} {'─'*8} {'─'*8} {'─'*25}")
+    for loc in loc_order:
+        if loc not in dict(active_locs):
+            continue
+        entry = dict(active_locs)[loc] if loc in dict(active_locs) else None
+        # 重新获取 entry
+        entry = None
+        for ln, e in active_locs:
+            if ln == loc:
+                entry = e
+                break
+        if entry is None:
             continue
 
-        label = LOCATION_LABELS.get(loc_name, loc_name)
-        skills = entry["skills"]
+        s = stats.get(loc, {})
+        total_loc = len(entry["skills"])
+        dirs = s.get("directory", 0)
+        links = s.get("symlink", 0)
+        broken = s.get("broken", 0)
         path_short = entry["path"].replace(os.path.expanduser("~"), "~")
-        lines.append(f"  {label}  ({len(skills)})    {path_short}")
+        broken_str = f" (+{broken}💔)" if broken else ""
+        lines.append(f"  {labels.get(loc, loc):<20} {total_loc:>4}{broken_str}    {dirs:>4}     {links:>4}   {path_short}")
 
-        if loc_name == "custom" and entry.get("git"):
+        if loc == "custom" and entry.get("git"):
             g = entry["git"]
-            git_info = f"分支: {g.get('branch', '?')}"
+            parts = []
             if g.get("dirty"):
-                git_info += " [有未提交变更]"
+                parts.append("有未提交变更")
             if g.get("ahead", 0) > 0:
-                git_info += f" [领先远程 {g['ahead']}]"
+                parts.append(f"领先远程 {g['ahead']}")
             if g.get("behind", 0) > 0:
-                git_info += f" [落后远程 {g['behind']}]"
-            lines.append(f"             {git_info}")
+                parts.append(f"落后远程 {g['behind']}")
+            if parts:
+                lines.append(f"  {'':<20} {'':>6}   Git: {', '.join(parts)}")
+    lines.append("")
 
-        lines.append("  " + "─" * 55)
+    # ════════════════════════════════════════════
+    #  SECTION 2: 详细清单（按位置）
+    # ════════════════════════════════════════════
+    lines.append(f"  ▸ 详细清单（按位置）")
+    lines.append(f"  {H}")
 
-        for sk in skills:
-            icon = FORM_ICONS.get(sk["type"], "?")
-            if sk.get("broken"):
-                icon = FORM_ICONS["broken"]
+    for loc in loc_order:
+        entry = None
+        for ln, e in active_locs:
+            if ln == loc:
+                entry = e
+                break
+        if entry is None:
+            continue
 
-            name = sk["name"]
-            md_flag = "✓" if sk.get("has_skill_md") else "✗"
-
-            # 构建形式说明
-            if sk.get("broken"):
-                form_desc = "→ [断裂!] " + sk.get("target", "")
-            elif sk["type"] == "symlink":
-                target = sk.get("target", "")
-                target_short = target.replace(os.path.expanduser("~"), "~")
-                form_desc = f"→ {target_short}"
-            else:
-                form_desc = "独立目录"
-
-            # 是否标准（custom 是 git 源码仓库，目录是正常的）
-            anomaly = ""
-            if loc_name not in ("agents", "custom") and sk["type"] == "directory":
-                anomaly = " ⚠ 非标准 (应为 symlink)"
-
-            if sk.get("exists_in_agents") and loc_name not in ("agents", "custom"):
-                if sk["type"] == "directory":
-                    anomaly += " ⚡同名冲突(与 agents)"
-
-            lines.append(f"  {icon} {md_flag} {name:<28} {form_desc}{anomaly}")
-
-        # 异常汇总行
-        anomalies_here = [sk for sk in skills
-                          if (loc_name not in ("agents", "custom") and sk["type"] == "directory")
-                          or sk.get("broken")]
-        if anomalies_here:
-            lines.append(f"     ── 本位置有 {len(anomalies_here)} 个异常 ──")
+        skills = entry["skills"]
+        label = labels.get(loc, loc)
+        path_short = entry["path"].replace(os.path.expanduser("~"), "~")
         lines.append("")
+        lines.append(f"  ╓── {label}  ({len(skills)}) ── {path_short}")
+        if loc == "custom" and entry.get("git"):
+            g = entry["git"]
+            lines.append(f"  ║  Git: {g.get('branch', '?')}"
+                         f"{'  [dirty]' if g.get('dirty') else ''}"
+                         f"{'  [ahead ' + str(g['ahead']) + ']' if g.get('ahead', 0) > 0 else ''}"
+                         f"{'  [behind ' + str(g['behind']) + ']' if g.get('behind', 0) > 0 else ''}")
 
-    # ── 跨位置冲突检测 ──
+        # 分组: 目录 / symlink / broken
+        dir_skills = [s for s in skills if s["type"] == "directory" and not s.get("broken")]
+        link_skills = [s for s in skills if s["type"] == "symlink" and not s.get("broken")]
+        broken_skills = [s for s in skills if s.get("broken")]
+
+        if dir_skills:
+            lines.append(f"  ║  ── 📁 独立目录 ({len(dir_skills)}) ──")
+            for sk in dir_skills:
+                mark = ""
+                if loc not in ("agents", "custom"):
+                    mark = "  ← 非标准，应为 symlink"
+                elif sk.get("exists_in_agents") and loc != "agents":
+                    mark = "  ← agents 也有此 skill"
+                lines.append(f"  ║    {sk['name']:<30}{mark}")
+        if link_skills:
+            lines.append(f"  ║  ── 🔗 符号链接 ({len(link_skills)}) ──")
+            for sk in link_skills:
+                target = sk.get("target", "").replace(os.path.expanduser("~"), "~")
+                lines.append(f"  ║    {sk['name']:<30} → {target}")
+        if broken_skills:
+            lines.append(f"  ║  ── 💔 断裂链接 ({len(broken_skills)}) ──")
+            for sk in broken_skills:
+                lines.append(f"  ║    {sk['name']:<30} → [断裂] {sk.get('target', '?')}")
+        lines.append(f"  ╙──")
+
+    # ════════════════════════════════════════════
+    #  SECTION 3: 交叉对照表
+    # ════════════════════════════════════════════
+    lines.append("")
+    lines.append(f"  ▸ 交叉对照（同名 skill 跨位置分布）")
+    lines.append(f"  {H}")
+
+    matrix = _build_location_matrix(scan_data)
+    multi_loc = {n: locs for n, locs in sorted(matrix.items()) if len(locs) > 1}
+    if multi_loc:
+        # Header
+        loc_keys = [l for l in loc_order if l in dict(active_locs)]
+        lines.append(f"  {'skill':<28} " + "  ".join(f"{short_labels.get(l,l):>8}" for l in loc_keys))
+        lines.append(f"  {'─'*27}  " + "  ".join("─" * 8 for _ in loc_keys))
+
+        for sname, locs_dict in multi_loc.items():
+            row = f"  {sname:<28}"
+            for loc in loc_keys:
+                info = locs_dict.get(loc)
+                if not info:
+                    row += f"  {'─':>8}"
+                elif info["broken"]:
+                    row += f"  {'💔断裂':>8}"
+                elif info["type"] == "symlink":
+                    row += f"  {'🔗链接':>8}"
+                else:
+                    # directory — show first 4 hash chars
+                    h = info.get("hash", "")[:4]
+                    row += f"  {'📁'+h:>8}" if h else "  {'📁':>8}"
+            lines.append(row)
+
+        # 图例
+        lines.append(f"  {'':28}  📁=目录  🔗=链接  💔=断裂  ─=不存在")
+    else:
+        lines.append("  （无跨位置同名 skill）")
+    lines.append("")
+
+    # ════════════════════════════════════════════
+    #  SECTION 4: 冲突与问题
+    # ════════════════════════════════════════════
+    issues: list[str] = []
+
+    # 4a. 断裂链接
+    for loc, entry in active_locs:
+        for sk in entry["skills"]:
+            if sk.get("broken"):
+                issues.append(f"  💔 {labels.get(loc, loc)}/{sk['name']} 链接断裂 → {sk.get('target','')}")
+
+    # 4b. 非标准存在形式
+    for loc, entry in active_locs:
+        if loc in ("agents", "custom"):
+            continue
+        for sk in entry["skills"]:
+            if sk["type"] == "directory":
+                issues.append(f"  ⚠ {labels.get(loc, loc)}/{sk['name']} 是独立目录，应为 symlink")
+
+    # 4c. 同名冲突 (hash 不同)
     conflicts = find_conflicts(scan_data)
-    if conflicts:
-        lines.append("  ╔══ 冲突检测 ═══════════════════════════════════════╗")
-        lines.append("  ║  以下 skill 在多个位置以不同形式/内容存在:      ║")
-        lines.append("  ╚═══════════════════════════════════════════════════╝")
-        lines.append("")
-        for name, entries in conflicts.items():
-            lines.append(f"  ⚡ {name}")
-            for loc_name, sk in entries:
-                icon = FORM_ICONS.get(sk["type"], "?")
-                loc_label = LOCATION_LABELS.get(loc_name, loc_name)
-                h = sk.get("skill_md_hash", "")
-                hash_info = f"  SKILL.md: [{h}]" if h else "  无 SKILL.md"
-                lines.append(f"     {icon} {loc_label:<18} {hash_info}")
-            lines.append("")
+    for cname, entries in conflicts.items():
+        parts = []
+        for loc_name, sk in entries:
+            loc_label = labels.get(loc_name, loc_name)
+            h = sk.get("skill_md_hash", "?")[:8]
+            icon = "💔" if sk.get("broken") else FORM_ICONS.get(sk["type"], "?")
+            parts.append(f"{icon} {loc_label}[{h}]")
+        issues.append(f"  ⚡ {cname}: " + "  vs  ".join(parts))
 
-    # ── 锁文件信息 ──
+    # 4d. 无 SKILL.md
+    for loc, entry in active_locs:
+        for sk in entry["skills"]:
+            if not sk.get("has_skill_md"):
+                issues.append(f"  ✗ {labels.get(loc, loc)}/{sk['name']} 缺少 SKILL.md")
+
+    if issues:
+        lines.append(f"  ▸ 待处理问题 ({len(issues)} 项)")
+        lines.append(f"  {H}")
+        for issue in issues:
+            lines.append(issue)
+        lines.append("")
+    else:
+        lines.append(f"  ▸ 待处理问题")
+        lines.append(f"  {H}")
+        lines.append("  （无待处理问题）")
+        lines.append("")
+
+    # ── FOOTER ──
     if lock_data:
         lock_v = lock_data.get("version", "?")
         lock_count = len(lock_data.get("skills", {}))
         lines.append(f"  🔒 .skill-lock.json v{lock_v} | {lock_count} 个 skill 版本追踪")
         lines.append("")
 
-    lines.append(separator)
+    lines.append(f"  {'─' * 56}")
     return "\n".join(lines)
 
 
