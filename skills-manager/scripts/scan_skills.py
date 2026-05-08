@@ -246,8 +246,26 @@ def _build_location_matrix(scan_data: dict) -> dict:
     return matrix
 
 
-BOLD = "\033[1m"
-RESET = "\033[0m"
+def cjk_width(s: str) -> int:
+    """计算字符串在终端中的实际显示宽度（中文字符算 2）"""
+    width = 0
+    for ch in s:
+        if '一' <= ch <= '鿿' or '　' <= ch <= '〿' \
+                or '＀' <= ch <= '￯':
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def cjk_ljust(s: str, width: int) -> str:
+    """按 CJK 宽度左对齐填充"""
+    return s + ' ' * (width - cjk_width(s))
+
+
+def cjk_rjust(s: str, width: int) -> str:
+    """按 CJK 宽度右对齐填充"""
+    return ' ' * (width - cjk_width(s)) + s
 
 
 def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
@@ -280,14 +298,15 @@ def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
     lines.append(f"  ▸ 分布一览")
     lines.append(f"  {H}")
     stats = _build_type_stats(scan_data)
-    # Header row
-    lines.append(f"  {'位置':<20} {'总计':>6} {'📁目录':>8} {'🔗链接':>8} {'路径':>25}")
-    lines.append(f"  {'─'*19} {'─'*6} {'─'*8} {'─'*8} {'─'*25}")
+    # Header row — 用 cjk 函数对齐
+    col_loc = 20
+    col_total = 6
+    col_dir = 8
+    col_link = 8
+    lines.append(f"  {cjk_ljust('位置', col_loc)} {cjk_rjust('总计', col_total)} {cjk_rjust('📁目录', col_dir)} {cjk_rjust('🔗链接', col_link)}  路径")
+    lines.append(f"  {cjk_ljust('─' * (col_loc - 1), col_loc)} {cjk_rjust('─' * (col_total - 1), col_total)} {cjk_rjust('─' * (col_dir - 1), col_dir)} {cjk_rjust('─' * (col_link - 1), col_link)}  {'─' * 20}")
+
     for loc in loc_order:
-        if loc not in dict(active_locs):
-            continue
-        entry = dict(active_locs)[loc] if loc in dict(active_locs) else None
-        # 重新获取 entry
         entry = None
         for ln, e in active_locs:
             if ln == loc:
@@ -303,7 +322,8 @@ def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
         broken = s.get("broken", 0)
         path_short = entry["path"].replace(os.path.expanduser("~"), "~")
         broken_str = f" (+{broken}💔)" if broken else ""
-        lines.append(f"  {labels.get(loc, loc):<20} {total_loc:>4}{broken_str}    {dirs:>4}     {links:>4}   {path_short}")
+        loc_label = labels.get(loc, loc)
+        lines.append(f"  {cjk_ljust(loc_label, col_loc)} {cjk_rjust(str(total_loc) + broken_str, col_total + len(broken_str))}    {cjk_rjust(str(dirs), col_dir)}     {cjk_rjust(str(links), col_link)}   {path_short}")
 
         if loc == "custom" and entry.get("git"):
             g = entry["git"]
@@ -315,7 +335,8 @@ def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
             if g.get("behind", 0) > 0:
                 parts.append(f"落后远程 {g['behind']}")
             if parts:
-                lines.append(f"  {'':<20} {'':>6}   Git: {', '.join(parts)}")
+                indent = ' ' * (col_loc + col_total + col_dir + col_link + 8)
+                lines.append(f"{indent}Git: {', '.join(parts)}")
     lines.append("")
 
     # ════════════════════════════════════════════
@@ -380,29 +401,35 @@ def format_scan_report(scan_data: dict, lock_data: dict | None = None) -> str:
     matrix = _build_location_matrix(scan_data)
     multi_loc = {n: locs for n, locs in sorted(matrix.items()) if len(locs) > 1}
     if multi_loc:
-        # Header
         loc_keys = [l for l in loc_order if l in dict(active_locs)]
-        lines.append(f"  {'skill':<28} " + "  ".join(f"{short_labels.get(l,l):>8}" for l in loc_keys))
-        lines.append(f"  {'─'*27}  " + "  ".join("─" * 8 for _ in loc_keys))
+        col_w = 10
+        name_w = 30
+        header = f"  {cjk_ljust('skill', name_w)}"
+        header += "".join(f"  {cjk_rjust(short_labels.get(l, l), col_w)}" for l in loc_keys)
+        lines.append(header)
+        sep = f"  {'─' * (name_w - 1)}"
+        sep += "".join(f"  {'─' * (col_w - 1)}" for _ in loc_keys)
+        lines.append(sep)
 
         for sname, locs_dict in multi_loc.items():
-            row = f"  {sname:<28}"
+            row = f"  {cjk_ljust(sname, name_w)}"
             for loc in loc_keys:
                 info = locs_dict.get(loc)
                 if not info:
-                    row += f"  {'─':>8}"
+                    row += f"  {cjk_rjust('─', col_w)}"
                 elif info["broken"]:
-                    row += f"  {'💔断裂':>8}"
+                    row += f"  {cjk_rjust('💔断裂', col_w)}"
                 elif info["type"] == "symlink":
-                    row += f"  {'🔗链接':>8}"
+                    row += f"  {cjk_rjust('🔗链接', col_w)}"
                 else:
-                    # directory — show first 4 hash chars
                     h = info.get("hash", "")[:4]
-                    row += f"  {'📁'+h:>8}" if h else "  {'📁':>8}"
+                    cell = f"📁{h}" if h else "📁"
+                    row += f"  {cjk_rjust(cell, col_w)}"
             lines.append(row)
 
         # 图例
-        lines.append(f"  {'':28}  📁=目录  🔗=链接  💔=断裂  ─=不存在")
+        indent = ' ' * (name_w + 2)
+        lines.append(f"{indent}📁=目录  🔗=链接  💔=断裂  ─=不存在")
     else:
         lines.append("  （无跨位置同名 skill）")
     lines.append("")
