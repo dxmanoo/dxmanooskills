@@ -1,0 +1,18 @@
+{
+  "_description": "Skills Manager 配置文件",
+  "_paths_description": "skills 存放路径，可根据需要增删",
+  "paths": {
+    "agents": "~/.agents/skills",
+    "claude": "~/.claude/skills",
+    "workbuddy": "~/.workbuddy/skills",
+    "custom_repo": "~/repos/dxmanooskills"
+  },
+  "_lock_file_description": "npx skills 版本锁定文件",
+  "lock_file": "~/.agents/.skill-lock.json",
+  "_custom_repo_remote": "自定义 skills 仓库的 Git remote",
+  "custom_repo_remote": "git@github.com:dxmanoo/dxmanooskills.git",
+  "_auto_fix_broken_links": "自动修复断裂链接",
+  "auto_fix_broken_links": false,
+  "_git_auto_pull": "更新时自动 pull 远程仓库",
+  "git_auto_pull": true
+}
