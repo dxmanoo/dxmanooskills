@@ -1,0 +1,35 @@
+{
+  "skill_name": "obsidian-tasks",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我生成一个今日看板 query 文件，保存到 Dashboards/今日看板.md",
+      "expected_output": "生成包含 ```tasks 代码块的 .md 文件，包含 due today、已过期等 query 块",
+      "description": "生成每日看板 Query 文件"
+    },
+    {
+      "id": 2,
+      "prompt": "查看一下我的 Obsidian Tasks 配置",
+      "expected_output": "运行 config_manager.py show，输出当前配置内容",
+      "description": "查看当前配置"
+    },
+    {
+      "id": 3,
+      "prompt": "我想添加一个任务：周五前完成项目报告，带 #work 标签，高优先级",
+      "expected_output": "调用 task_write.py add，生成带 🔼、📅、#work 格式的任务行",
+      "description": "新建带日期和标签的高优先级任务"
+    },
+    {
+      "id": 4,
+      "prompt": "帮我查一下有哪些任务今天到期",
+      "expected_output": "调用 task_read.py search --status=not_done --due=today，列出结果",
+      "description": "搜索今日到期的未完成任务"
+    },
+    {
+      "id": 5,
+      "prompt": "把我的 vault 路径改成 /Users/guo/Obsidian/MyVault",
+      "expected_output": "调用 config_manager.py set vault_path /Users/guo/Obsidian/MyVault，并显式告知用户",
+      "description": "修改 vault 路径配置"
+    }
+  ]
+}
