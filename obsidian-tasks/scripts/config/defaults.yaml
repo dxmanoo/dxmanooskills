@@ -1,7 +1,0 @@
-vault_path: ''
-task_format: emoji
-default_inbox_file: Inbox.md
-default_query_dir: Dashboards
-date_format: YYYY-MM-DD
-auto_add_created_date: true
-first_run_done: false
