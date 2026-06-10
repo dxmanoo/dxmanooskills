@@ -1,2 +1,8 @@
 .DS_Store
 *.bak
+.agents/
+.trae/
+gotolearn.skill
+skills-lock.json
+obsidian-tasks/config/defaults.yaml
+obsidian-tasks/scripts/config/defaults.yaml
